@@ -100,7 +100,8 @@ def get_safe_cell_cost(
     current_step: int,
     map_memory,
     enemy_robots: dict,
-    unit_type: int
+    unit_type: int,
+    south_bound: int
 ) -> float:
     """Calculate cell traversal cost prioritizing scroll boundary evasion and enemy avoidance.
     
@@ -169,10 +170,8 @@ def find_safe_path(
     def is_passable_fn(f, t):
         return map_memory.is_passable(f, t)
         
-    def cost_fn(f, t):
-        # We don't know steps_taken here, so we'll pass 0 as a placeholder
-        # The find_path_astar function will handle tracking steps properly
-        return get_safe_cell_cost(f, t, 0, current_step, map_memory, enemy_memory.enemy_robots, unit_type)
+    def cost_fn(f, t, steps_taken, cur_step, mm):
+        return get_safe_cell_cost(f, t, steps_taken, cur_step, mm, enemy_memory.enemy_robots, unit_type, south_bound)
         
     # Sort goals by Manhattan distance to the start cell
     sorted_goals = list(goals)
