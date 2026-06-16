@@ -4,7 +4,7 @@ from typing import Dict, Tuple, List, Set, Optional
 from agent.state import Robot, GameConfig
 from strategy.survival_strategy import predict_future_boundary
 from utils.geometry import get_manhattan_distance
-from pathfinding.bfs import find_shortest_path
+from pathfinding.bfs import compute_bfs_distances
 from memory.map_memory import MapMemory
 
 def should_transform(
@@ -60,12 +60,23 @@ def assign_mining_nodes(
     is_left_side = my_factory.col < (width // 2)
     home_cols = range(0, width // 2) if is_left_side else range(width // 2, width)
     
+    is_passable_fn = lambda f, t: map_memory.is_passable(f, t)
+    
     for miner in miners:
         if not safe_nodes:
             break
             
         best_node = None
         best_dist = float('inf')
+        
+        # Compute distances from this miner to all cells in a single BFS pass
+        distances = compute_bfs_distances(
+            start=miner.pos,
+            is_passable_fn=is_passable_fn,
+            width=width,
+            south_bound=south_bound,
+            north_bound=north_bound
+        )
         
         for node in safe_nodes:
             nx, ny = node
@@ -85,20 +96,8 @@ def assign_mining_nodes(
             if is_threatened:
                 continue
                 
-            # 3. Path reachability and distance check
-            is_passable_fn = lambda f, t: map_memory.is_passable(f, t)
-            path = find_shortest_path(
-                start=miner.pos,
-                goals={node},
-                is_passable_fn=is_passable_fn,
-                width=width,
-                south_bound=south_bound,
-                north_bound=north_bound
-            )
-            if path is None:
-                continue  # Unreachable by known path
-                
-            path_dist = len(path) - 1
+            # 3. Distance check using pre-computed BFS distance map
+            path_dist = distances.get(node, float('inf'))
             if path_dist < best_dist:
                 best_dist = path_dist
                 best_node = node
@@ -108,3 +107,4 @@ def assign_mining_nodes(
             safe_nodes.remove(best_node)
             
     return assignments
+

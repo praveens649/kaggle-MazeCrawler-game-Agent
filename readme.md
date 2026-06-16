@@ -1,77 +1,164 @@
+# Maze Crawler - Intelligent Classical AI Agent (agent_v2)
 
+This repository contains the architecture, implementation, and test suites for a top-tier, leaderboard-ready classical AI agent developed for Kaggle's **Maze Crawler** competition. 
 
-## Game Feature & Implementation Efficiency
-
-Our agent ([CrawlAgent](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/agent/agent.py#L50) / [agent_v2](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/agent/agent_v2.py#L421)) is designed to outperform baseline bots (e.g., standard random or greedy agents) by optimizing computation, prediction, and strategic execution. Below are the key engineering design features that ensure high efficiency:
-
-### 1. Symmetry-Based Fog of War Mapping
-The game board has East-West (horizontal) symmetry. Our [MapMemory](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/memory/map_memory.py#L27) model automatically mirrors any discovered cell's walls to its counterpart on the other half of the board using [mirror_wall_bitfield](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/memory/map_memory.py#L8). This:
-- **Doubles exploration rate** without requiring physical robot movement.
-- Allows the pathfinding module to pre-compute paths through unrevealed regions in the Fog of War.
-
-### 2. Predictive Friendly Collision Simulator
-Friendly fire (crush rules and same-type unit collisions) is a major hazard in Crawl. The bot incorporates a local **predictive collision resolution loop** in [resolve_friendly_collisions](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/combat/collision.py#L8) before submitting actions:
-- Anticipates the landing coordinates of all friendly units and factory spawns.
-- Resolves conflicts greedily: prioritizes factory survival and high-tier units, forcing others to `IDLE` or canceling build orders if the spawn gate is blocked.
-- Avoids mutual annihilation of friendly scouts and workers, preserving material advantage.
-
-### 3. Danger-Aware A* Pathfinder
-Instead of running basic BFS/DFS, the bot uses a customized A* search algorithm in [find_safe_path](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/pathfinding/astar.py#L114) featuring a **dynamic safety cost function**:
-- **Scroll Evasion:** Applies heavy exponential penalties to cells near the advancing southern boundary to prevent scroll deaths (see [get_safe_cell_cost](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/pathfinding/astar.py#L60)).
-- **Threat Mitigation:** Dynamically reads enemy unit positions and adds steep cost weightings to adjacent cells, preventing units from walking into lethal encounters.
-- **Scroll Prediction:** Validates coordinates to ensure a path remains above the predicted scroll boundary on arrival.
-
-### 4. Proactive Path Excavation & Gate Clearance
-Factory mobility is critical for late-game survival. 
-- Workers proactively scan a 3-column corridor ahead of the factory and navigate to demolish any blocking walls.
-- Robots spawned by the factory check if they are blocking the spawn gate and move immediately to clear it using [get_clear_gate_action](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/agent/agent.py#L27), preventing factory construction blocks.
-
-### 5. Multi-Tiered Target Scoring
-Target selection in [choose_goal](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/agent/agent_v2.py#L156) uses a specialized priority scoring matrix:
-- **Scouts:** Target crystals and frontier cells, with high-energy scouts returning to transfer energy to the factory.
-- **Miners:** Automatically navigate to and transform on mining nodes.
-- **Workers:** Focus on clearing factory path blocks, or return to act as factory escorts.
-- **Oscillation Mitigation:** Distance and visit-frequency penalties are combined with territorial home-side constraints to prevent infinite path oscillations (see [score_targets](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/agent/agent_v2.py#L79)).
+Our agent, [agent_v2.py](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/agent/agent_v2.py), is engineered to consistently outperform baseline and greedy bots by combining advanced graph algorithms, Dynamic Programming (DP), Finite State Machines (FSM), Bayesian probability mapping, and threat-aware pathfinding.
 
 ---
 
-## Contributing
+## The Strategic Shift: "The Scroll is the Enemy"
 
-We welcome contributions to improve the agent's performance, heuristics, and architecture! 
+Most baseline agents fail because they treat Maze Crawler as a combat-heavy skirmish game. Our agent is designed around the core paradigm that **migration, space preservation, and resource logistics are primary**, while combat is secondary.
 
-### Project Structure Overview
-- [agent/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/agent): Contains state representation, action parsing, and core agent entry points.
-- [combat/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/combat): Friendly collision simulation and path deconfliction.
-- [economy/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/economy): Logic for crystal collection, node mining, and energy transfer.
-- [exploration/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/exploration): Frontier cell detection for mapping unrevealed areas.
-- [pathfinding/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/pathfinding): Weighted A* pathfinding and BFS distance grids.
-- [strategy/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/strategy): Macro scheduling, spawn logic, and factory survival metrics.
-- [units/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/units): Custom behavior trees/decision logic for each robot class.
-- [utils/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/utils): Coordinate geometry and wall checking helpers.
-- [memory/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/memory): Shared memory representations for discovered walls and enemy movements.
-- [debug/](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/debug): ASCII map visualizer and step logs.
+```mermaid
+graph TD;
+    Obs[Observation & Map Memory] --> BP[Bayesian Predictor]
+    Obs --> IM[Influence & Heatmaps]
+    BP --> IM
+    IM --> Path[Danger-Aware A* Pathfinder]
+    Obs --> DP[DP Path Optimizer]
+    FSM[FSM Unit Decision Tree] --> Path
+    DP --> Factory[Factory Migration Logic]
+```
 
-### Contribution Guidelines
-1. **Branching & PRs:** Create a descriptive feature branch from `main` (e.g., `feature/improved-worker-tunneling`). Submit pull requests detailing the changes and performance impact.
-2. **Code Standards:** 
-   - Write clean, modular, and self-documenting code.
-   - Follow standard Python (PEP 8) style guidelines.
-   - Do not store persistent game state in global variables that could persist across runs (reset state in [agent_v2](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/agent/agent_v2.py#L421) on step 0).
-3. **Local Testing:**
-   - Always run local games to verify that your changes do not break or regress the bot.
-   - Test against baseline agents or previous versions:
-     ```python
-     from kaggle_environments import make
-     env = make("crawl", debug=True)
-     env.run(["main.py", "greedy_opponent.py"])
-     ```
-   - Run the custom debug scripts (e.g., [debug_step_83.py](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/debug_step_83.py)) to reproduce specific edge cases and test hotfixes.
-4. **Submitting to Kaggle:**
-   - Ensure the submission can be bundled cleanly:
-     ```bash
-     tar -czf submission.tar.gz main.py agent/ combat/ economy/ exploration/ pathfinding/ strategy/ units/ utils/ memory/
-     ```
-   - Submit via the Kaggle CLI:
-     ```bash
-     kaggle competitions submit maze-crawler -f submission.tar.gz -m "Brief description of changes"
-     ```
+---
+
+## Key Engineering Features
+
+### 1. Bayesian Resource Predictor
+* **File:** [bayesian_predictor.py](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/strategy/bayesian_predictor.py)
+* **Description:** Estimates crystal and mining node presence inside the Fog of War.
+* **Mechanism:**
+  * Exploits the board's East-West (horizontal) generation symmetry. Observing a cell on one side immediately updates the prior probability for its mirrored counterpart.
+  * Tracks enemy robot coordinates and estimates their vision footprint over time to calculate the posterior probability that unvisited resources have already been harvested.
+
+### 2. Threat & Attraction Influence Maps
+* **File:** [influence_map.py](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/strategy/influence_map.py)
+* **Description:** Builds a dynamic risk/value grid to guide pathfinding.
+* **Fields:**
+  * **Threat Influence Map:** Spreads steep danger penalties around observed enemy units (weighted by enemy tier and Manhattan distance) to prevent units from walking into lethal encounters.
+  * **Attraction Heatmap:** Projects positive attraction weights from known resources and Bayesian predictions.
+* **A\* Pathfinder Integration:** Located in [astar.py](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/pathfinding/astar.py), paths automatically veer around threat bubbles and gravitate toward resource clusters.
+
+### 3. Factory Dynamic Programming (DP) Optimizer
+* **File:** [dp_path_optimizer.py](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/strategy/dp_path_optimizer.py)
+* **Description:** Guides factory movement and jump decisions over a finite lookahead horizon.
+* **Mechanism:**
+  * Models factory states `(col, row, jump_cooldown)` over a 5-step horizon.
+  * Uses backward induction to maximize vertical progress and safety buffers, evading dead ends, wall traps, and scroll boundaries.
+
+### 4. Finite State Machine (FSM) Behavior Controller
+* **File:** [fsm.py](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/strategy/fsm.py)
+* **Description:** Standardizes unit decision logic into distinct, guard-protected states.
+* **States:** Transitions automatically manage unit lifecycle actions:
+  * **Scouts:** Explore frontier cells, collect crystals, and return to dump energy.
+  * **Workers:** Demolish walls blockading the factory and clear spawn gates.
+  * **Miners:** Path to mining nodes and transition into stationary mines.
+
+### 5. Symmetrical Fog of War Memory
+* **File:** [map_memory.py](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/memory/map_memory.py)
+* **Description:** Tracks discovered cells, walls, crystals, and mines across turns.
+* **Symmetry Reflection:** Uses horizontal symmetry to infer and populate hidden walls in the Fog of War, doubling exploration efficiency.
+
+### 6. Friendly Collision Simulator
+* **File:** [collision.py](file:///c:/Users/Praveen/kaggle-MazeCrawler-game/combat/collision.py)
+* **Description:** A local predictive loop run prior to executing turns to resolve friendly fire.
+* **Action:** Prioritizes high-tier unit actions and factory survival, forcing colliding lower-tier friendly units to `IDLE` or canceling build orders if the spawn gate is blocked.
+
+---
+
+## Directory Structure
+
+```
+.
+├── agent/
+│   └── agent_v2.py            # Primary agent wrapper & orchestrator
+├── combat/
+│   └── collision.py           # Collision resolution & friendly fire avoidance
+├── economy/
+│   ├── crystal_logic.py       # Crystal harvesting decisions
+│   └── mining_logic.py        # Miner and mine coordination
+├── exploration/               # Frontier cell mapping logic
+├── memory/
+│   ├── enemy_memory.py        # Enemy position and trail tracking
+│   ├── map_memory.py          # Symmetry-reflected grid memory
+│   └── memory.py              # Memory structure interface
+├── pathfinding/
+│   ├── astar.py               # Influence-aware A* search
+│   └── bfs.py                 # BFS-based distance transforms
+├── strategy/
+│   ├── bayesian_predictor.py  # Fog of War resource predictor
+│   ├── dp_path_optimizer.py   # Factory DP migration router
+│   ├── fsm.py                 # Unit FSM state transitions
+│   ├── influence_map.py       # Threat/attraction heatmaps
+│   ├── macro_strategy.py      # Macro phase manager
+│   ├── survival_strategy.py   # Factory scroll-evasion heuristics
+│   └── task_assignment.py     # Role & target allocation
+├── units/
+│   ├── factory_logic.py       # Factory production & jump wrapper
+│   ├── miner_logic.py         # Miner behaviors
+│   ├── scout_logic.py         # Scout behaviors
+│   └── worker_logic.py        # Worker tunneling & gate clearance
+├── utils/                     # Geometry, coordinate, and wall bitwise helpers
+├── agent.md                   # Full agent specification document
+└── main.py                    # Competition submission entry point
+```
+
+---
+
+## Local Development & Validation
+
+### Installation
+Ensure you have the required packages installed:
+```bash
+pip install kaggle-environments numpy
+```
+
+### Running a Single Match
+Run a local simulation of the agent against the baseline greedy opponent:
+```python
+from kaggle_environments import make
+
+env = make("crawl", debug=True)
+env.run(["main.py", "greedy_opponent.py"])
+env.render(mode="ipython", width=800, height=800)
+```
+
+### Advanced Testing Scripts
+We maintain custom testing scripts located in the local configuration directories to validate agent performance:
+
+1. **Batch Test Suite:** Runs 10 isolated seeds against `greedy_opponent.py` to calculate win rates and aggregate scores.
+   ```bash
+   python C:\Users\Praveen\.gemini\antigravity-ide\brain\4517fd7e-e53a-474b-afe6-bdeb1d13fdd3\scratch\run_batch.py
+   ```
+2. **Specific Seed Runner:** Troubleshoots agent behavior on a specific game board configuration (e.g. debugging scroll evasion or factory trapping).
+   ```bash
+   python C:\Users\Praveen\.gemini\antigravity-ide\brain\4517fd7e-e53a-474b-afe6-bdeb1d13fdd3\scratch\test_specific_seed.py
+   ```
+3. **Submission Integrity Verifier:** Extracts and imports the final tarball inside an isolated sandbox to verify syntax errors and configuration validity.
+   ```bash
+   python C:\Users\Praveen\.gemini\antigravity-ide\brain\4517fd7e-e53a-474b-afe6-bdeb1d13fdd3\scratch\verify_submission.py
+   ```
+
+> [!NOTE]
+> **Isolation Notice:** Always evaluate different agent versions in isolated Python processes (such as via command-line execution). Module-level globals can leak state if multiple agents are run sequentially in the same process, causing false performance regressions.
+
+---
+
+## Kaggle Submission Workflow
+
+1. **Pack the Agent Archive:**
+   Ensure all core folders are bundled with the `main.py` entry point at the root:
+   ```bash
+   tar -czf submission.tar.gz main.py agent/ combat/ economy/ exploration/ memory/ pathfinding/ strategy/ units/ utils/
+   ```
+
+2. **Submit via CLI:**
+   ```bash
+   kaggle competitions submit maze-crawler -f submission.tar.gz -m "Optimized agent_v2 with DP Factory Migration & FSM Controller"
+   ```
+
+3. **Check Submission Status:**
+   ```bash
+   kaggle competitions submissions maze-crawler
+   ```

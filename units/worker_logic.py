@@ -17,7 +17,8 @@ def get_worker_action(
     width: int,
     south_bound: int,
     north_bound: int,
-    config: GameConfig
+    config: GameConfig,
+    influence_map = None
 ) -> str:
     """Determine action for a worker.
     
@@ -85,7 +86,8 @@ def get_worker_action(
         current_step=current_step,
         width=width,
         south_bound=south_bound,
-        north_bound=north_bound
+        north_bound=north_bound,
+        influence_map=influence_map
     )
     
     if path and len(path) > 1:

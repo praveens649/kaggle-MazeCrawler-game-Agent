@@ -34,12 +34,21 @@ from utils.geometry import get_manhattan_distance
 from debug.logger import StateLogger
 from debug.visualizer import log_ascii_map
 
+from strategy.bayesian_predictor import BayesianResourcePredictor
+from strategy.influence_map import InfluenceMap
+from strategy.dp_path_optimizer import DPPathOptimizer
+from strategy.fsm import RobotFSM
+
 # Persistent states across steps
 memory = GameMemory()
 task_manager = TaskAssignmentManager()
 current_step = 0
 macro = MacroStrategy()
 survival = SurvivalStrategy()
+bayesian_predictor = BayesianResourcePredictor()
+influence_map = InfluenceMap()
+dp_path_optimizer = DPPathOptimizer()
+robot_fsm = RobotFSM()
 
 
 def update_memory(obs_state: ObsState, memory_obj: GameMemory, step: int):
@@ -57,7 +66,7 @@ def update_memory(obs_state: ObsState, memory_obj: GameMemory, step: int):
 
 def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
     """The enhanced agent function implementing task-based autonomous architecture."""
-    global memory, task_manager, current_step
+    global memory, task_manager, current_step, bayesian_predictor, influence_map, dp_path_optimizer, robot_fsm
 
     # 1. Parse observation and config
     config_state = parse_config(config)
@@ -70,9 +79,23 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
     if current_step == 0:
         memory = GameMemory()
         task_manager = TaskAssignmentManager()
+        bayesian_predictor = BayesianResourcePredictor()
+        influence_map = InfluenceMap()
+        dp_path_optimizer = DPPathOptimizer()
+        robot_fsm = RobotFSM()
 
     # 2. Update memory systems
     update_memory(obs_state, memory, current_step)
+    
+    # 2.5 Update Bayesian Predictor and Influence Map
+    bayesian_predictor.update(obs_state, memory.map, config_state, current_step)
+    influence_map.compute(
+        obs=obs_state,
+        config=config_state,
+        predictor=bayesian_predictor,
+        south_bound=obs_state.south_bound,
+        north_bound=obs_state.north_bound
+    )
 
     # 3. Clean up task list for active robots
     active_uids = set(obs_state.my_robots.keys())
@@ -86,42 +109,7 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
     workers = [r for r in my_robots.values() if r.rtype == 2]
     miners = [r for r in my_robots.values() if r.rtype == 3]
 
-    # 5. Check for scroll safety and assign ESCAPE_SCROLL task if threatened
-    for robot in my_robots.values():
-        if robot.rtype == 0:  # Factory has custom survival logic
-            continue
-
-        # If in danger of being consumed by scroll in 5 turns, assign escape task
-        if survival.is_cell_in_danger(robot.pos, current_step, obs_state.south_bound, 5):
-            future_sb = predict_future_boundary(current_step, obs_state.south_bound, 6)
-
-            # Identify safe reachable coordinates (any discovered non-enclosed cell above future_sb)
-            safe_goals = set()
-            for col in range(config_state.width):
-                for row in range(future_sb + 1, obs_state.north_bound + 1):
-                    pos = (col, row)
-                    if pos in memory.map.discovered_cells:
-                        w = memory.map.get_wall_value(pos)
-                        if w != -1 and w != 15:
-                            safe_goals.add(pos)
-
-            if safe_goals:
-                path = find_safe_path(
-                    start=robot.pos,
-                    goals=safe_goals,
-                    map_memory=memory.map,
-                    enemy_memory=memory.enemy,
-                    unit_type=robot.rtype,
-                    current_step=current_step,
-                    width=config_state.width,
-                    south_bound=obs_state.south_bound,
-                    north_bound=obs_state.north_bound
-                )
-                if path:
-                    task_manager.assign(robot.uid, Task(TASK_ESCAPE_SCROLL, target_pos=path[-1]))
-                    continue
-
-    # 6. Assign mining nodes to miners
+    # 5. Assign mining nodes to miners
     mine_nodes = obs_state.mining_nodes
     miner_assignments = assign_mining_nodes(
         miners=miners,
@@ -134,15 +122,8 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
         current_step=current_step,
         width=config_state.width
     )
-    for miner in miners:
-        if task_manager.get_task(miner.uid).name == TASK_ESCAPE_SCROLL:
-            continue
-        if miner.uid in miner_assignments:
-            task_manager.assign(miner.uid, Task(TASK_GO_TO_MINING_NODE, target_pos=miner_assignments[miner.uid]))
-        else:
-            task_manager.assign(miner.uid, Task(TASK_RETURN_TO_FACTORY, target_pos=my_factory.pos))
 
-    # 7. Assign crystals to scouts
+    # 6. Assign crystals to scouts
     crystals = obs_state.crystals
     scout_assignments = assign_crystal_targets(
         scouts=scouts,
@@ -156,6 +137,7 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
         north_bound=obs_state.north_bound
     )
 
+    # 7. Identify frontier cells for exploration
     known_passable = memory.map.get_known_passable_cells(obs_state.south_bound, obs_state.north_bound)
     frontier_cells = find_frontier_cells(
         known_passable_cells=known_passable,
@@ -172,21 +154,7 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
     if current_step < 300:
         frontier_cells = [f for f in frontier_cells if f[0] in home_cols]
 
-    for scout in scouts:
-        if task_manager.get_task(scout.uid).name == TASK_ESCAPE_SCROLL:
-            continue
-        if scout.uid in scout_assignments:
-            task_manager.assign(scout.uid, Task(TASK_COLLECT_CRYSTAL, target_pos=scout_assignments[scout.uid]))
-        elif frontier_cells:
-            # Target the nearest frontier cell
-            frontier_cells.sort(key=lambda f: get_manhattan_distance(scout.pos, f))
-            best_frontier = frontier_cells[0]
-            task_manager.assign(scout.uid, Task(TASK_EXPLORE, target_pos=best_frontier))
-        else:
-            task_manager.assign(scout.uid, Task(TASK_IDLE))
-
-    # 8. Assign workers tasks
-    # Verify if factory has escape paths
+    # 8. Identify blocking walls for workers
     survivable, escape_path = survival.verify_factory_survivability(
         my_factory, memory.map, current_step, obs_state.south_bound, obs_state.north_bound
     )
@@ -201,11 +169,8 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
                 blocking_wall_pos = pos
                 break
 
-    # Proactive path clearing corridor scan (even if factory is currently survivable)
+    # Proactive path clearing corridor scan
     if blocking_wall_pos is None:
-        # Scan a 3-column corridor: [factory.col - 1, factory.col, factory.col + 1]
-        # From factory's row + 1 up to factory's row + 8 (or north_bound)
-        # Find the lowest row that has a vertical blocking wall.
         found_wall = False
         for r in range(my_factory.row + 1, min(my_factory.row + 9, obs_state.north_bound + 1)):
             for c in [my_factory.col, my_factory.col - 1, my_factory.col + 1]:
@@ -226,7 +191,7 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
             if found_wall:
                 break
 
-    # If still no blocking wall, look for walls blocking crystals or mining nodes on our home side
+    # Look for walls blocking resources
     if blocking_wall_pos is None:
         resources = list(obs_state.crystals.keys()) + list(obs_state.mining_nodes)
         best_resource_wall = None
@@ -254,19 +219,95 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
         if best_resource_wall is not None:
             blocking_wall_pos = best_resource_wall
 
-    for worker in workers:
-        if task_manager.get_task(worker.uid).name == TASK_ESCAPE_SCROLL:
+    # 9. Run FSM Transition and assign tasks
+    for robot in my_robots.values():
+        if robot.rtype == 0:
             continue
-        if blocking_wall_pos is not None:
-            task_manager.assign(worker.uid, Task(TASK_REMOVE_WALL, target_pos=blocking_wall_pos))
+
+        # Check for safe escape goals if threatened by scroll
+        is_threatened = robot.row <= obs_state.south_bound + 4
+        safe_goals = set()
+        if is_threatened:
+            future_sb = predict_future_boundary(current_step, obs_state.south_bound, 6)
+            for col in range(config_state.width):
+                for row in range(future_sb + 1, obs_state.north_bound + 1):
+                    pos = (col, row)
+                    if pos in memory.map.discovered_cells:
+                        w = memory.map.get_wall_value(pos)
+                        if w != -1 and w != 15:
+                            safe_goals.add(pos)
+
+        # Transition the robot's FSM state
+        from strategy.fsm import (
+            STATE_ESCAPE_SCROLL,
+            STATE_GO_TO_MINING_NODE,
+            STATE_COLLECT_CRYSTAL,
+            STATE_EXPLORE,
+            STATE_REMOVE_WALL,
+            STATE_RETURN_TO_FACTORY
+        )
+        next_state = robot_fsm.transition(
+            robot=robot,
+            obs=obs_state,
+            config=config_state,
+            current_step=current_step,
+            is_safe_escape_available=len(safe_goals) > 0,
+            scout_assignment_pos=scout_assignments.get(robot.uid),
+            miner_assignment_pos=miner_assignments.get(robot.uid),
+            blocking_wall_pos=blocking_wall_pos,
+            frontier_cells=frontier_cells
+        )
+
+        # Assign task based on FSM state
+        if next_state == STATE_ESCAPE_SCROLL:
+            path = find_safe_path(
+                start=robot.pos,
+                goals=safe_goals,
+                map_memory=memory.map,
+                enemy_memory=memory.enemy,
+                unit_type=robot.rtype,
+                current_step=current_step,
+                width=config_state.width,
+                south_bound=obs_state.south_bound,
+                north_bound=obs_state.north_bound,
+                influence_map=influence_map
+            )
+            if path:
+                task_manager.assign(robot.uid, Task(TASK_ESCAPE_SCROLL, target_pos=path[-1]))
+            else:
+                task_manager.assign(robot.uid, Task(TASK_IDLE))
+        elif next_state == STATE_GO_TO_MINING_NODE:
+            task_manager.assign(robot.uid, Task(TASK_GO_TO_MINING_NODE, target_pos=miner_assignments[robot.uid]))
+        elif next_state == STATE_COLLECT_CRYSTAL:
+            task_manager.assign(robot.uid, Task(TASK_COLLECT_CRYSTAL, target_pos=scout_assignments[robot.uid]))
+        elif next_state == STATE_EXPLORE:
+            if frontier_cells:
+                # Target nearest frontier
+                frontier_cells.sort(key=lambda f: get_manhattan_distance(robot.pos, f))
+                task_manager.assign(robot.uid, Task(TASK_EXPLORE, target_pos=frontier_cells[0]))
+            else:
+                task_manager.assign(robot.uid, Task(TASK_IDLE))
+        elif next_state == STATE_REMOVE_WALL:
+            task_manager.assign(robot.uid, Task(TASK_REMOVE_WALL, target_pos=blocking_wall_pos))
+        elif next_state == STATE_RETURN_TO_FACTORY:
+            task_manager.assign(robot.uid, Task(TASK_RETURN_TO_FACTORY, target_pos=my_factory.pos))
         else:
-            task_manager.assign(worker.uid, Task(TASK_RETURN_TO_FACTORY, target_pos=my_factory.pos))
+            task_manager.assign(robot.uid, Task(TASK_IDLE))
 
     # 9. Generate raw decisions
     proposed_actions = {}
     spawn_decision = macro.get_spawn_decision(obs_state, config_state, current_step)
 
-    # Factory logic
+    # Factory logic (using DP Path Optimizer)
+    dp_action = dp_path_optimizer.get_optimal_action(
+        factory=my_factory,
+        map_memory=memory.map,
+        config=config_state,
+        current_step=current_step,
+        south_bound=obs_state.south_bound,
+        north_bound=obs_state.north_bound
+    )
+    
     proposed_actions[my_factory.uid] = get_factory_action(
         factory=my_factory,
         spawn_decision=spawn_decision,
@@ -276,7 +317,8 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
         south_bound=obs_state.south_bound,
         north_bound=obs_state.north_bound,
         config=config_state,
-        current_step=current_step
+        current_step=current_step,
+        dp_action=dp_action
     )
 
     # Spawning gate definition
@@ -298,7 +340,8 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
                 current_step=current_step,
                 width=config_state.width,
                 south_bound=obs_state.south_bound,
-                north_bound=obs_state.north_bound
+                north_bound=obs_state.north_bound,
+                influence_map=influence_map
             )
 
         # Miner logic
@@ -319,7 +362,8 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
                 south_bound=obs_state.south_bound,
                 north_bound=obs_state.north_bound,
                 config=config_state,
-                current_step=current_step
+                current_step=current_step,
+                influence_map=influence_map
             )
 
         # Worker logic
@@ -339,7 +383,8 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
                 width=config_state.width,
                 south_bound=obs_state.south_bound,
                 north_bound=obs_state.north_bound,
-                config=config_state
+                config=config_state,
+                influence_map=influence_map
             )
 
     # 10. Apply energy transfers (Priority over movement if transfer is active)

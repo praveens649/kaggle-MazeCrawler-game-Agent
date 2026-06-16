@@ -2,7 +2,7 @@
 
 from typing import Dict, Tuple, List, Set, Optional
 from agent.state import Robot
-from pathfinding.bfs import find_shortest_path
+from pathfinding.bfs import compute_bfs_distances
 from memory.map_memory import MapMemory
 from utils.geometry import get_manhattan_distance
 
@@ -34,12 +34,23 @@ def assign_crystal_targets(
     is_left_side = my_factory.col < (width // 2)
     home_cols = range(0, width // 2) if is_left_side else range(width // 2, width)
     
+    is_passable_fn = lambda f, t: map_memory.is_passable(f, t)
+    
     for scout in scouts:
         if not available_crystals:
             break
             
         best_crystal = None
         best_dist = float('inf')
+        
+        # Compute distances from this scout to all cells in a single BFS pass
+        distances = compute_bfs_distances(
+            start=scout.pos,
+            is_passable_fn=is_passable_fn,
+            width=width,
+            south_bound=south_bound,
+            north_bound=north_bound
+        )
         
         for crystal_pos in available_crystals:
             cx, cy = crystal_pos
@@ -62,20 +73,8 @@ def assign_crystal_targets(
             if is_threatened:
                 continue
                 
-            # 4. Path reachability and distance check
-            is_passable_fn = lambda f, t: map_memory.is_passable(f, t)
-            path = find_shortest_path(
-                start=scout.pos,
-                goals={crystal_pos},
-                is_passable_fn=is_passable_fn,
-                width=width,
-                south_bound=south_bound,
-                north_bound=north_bound
-            )
-            if path is None:
-                continue # Unreachable by known path
-                
-            path_dist = len(path) - 1
+            # 4. Distance lookup
+            path_dist = distances.get(crystal_pos, float('inf'))
             if path_dist < best_dist:
                 best_dist = path_dist
                 best_crystal = crystal_pos
@@ -85,3 +84,4 @@ def assign_crystal_targets(
             available_crystals.remove(best_crystal)
             
     return assignments
+

@@ -15,7 +15,8 @@ def get_scout_action(
     current_step: int,
     width: int,
     south_bound: int,
-    north_bound: int
+    north_bound: int,
+    influence_map = None
 ) -> str:
     """Determine action for a scout based on its assigned task.
     
@@ -42,7 +43,8 @@ def get_scout_action(
         current_step=current_step,
         width=width,
         south_bound=south_bound,
-        north_bound=north_bound
+        north_bound=north_bound,
+        influence_map=influence_map
     )
     
     if path and len(path) > 1:

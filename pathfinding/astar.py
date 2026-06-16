@@ -63,7 +63,8 @@ def get_safe_cell_cost(
     current_step: int,
     south_bound: int,
     enemy_robots: dict,
-    unit_type: int
+    unit_type: int,
+    influence_map = None
 ) -> float:
     """Calculate cell traversal cost prioritizing scroll boundary evasion and enemy avoidance.
     
@@ -109,6 +110,14 @@ def get_safe_cell_cost(
             elif get_manhattan_distance(to_pos, e_pos) == 1:
                 cost += 300.0
                 
+    # 3. Add influence map threat and attraction costs
+    if influence_map is not None:
+        threat = influence_map.get_threat(to_pos)
+        attract = influence_map.get_attraction(to_pos)
+        # Threat adds cost, attraction reduces cost (but not below 0.1 to avoid negative weights)
+        cost += threat
+        cost = max(0.1, cost - attract)
+        
     return cost
 
 def find_safe_path(
@@ -120,7 +129,8 @@ def find_safe_path(
     current_step: int,
     width: int,
     south_bound: int,
-    north_bound: int
+    north_bound: int,
+    influence_map = None
 ) -> Optional[List[Tuple[int, int]]]:
     """Find a path using A* that minimizes danger from the scroll and enemy units."""
     if not goals:
@@ -133,7 +143,7 @@ def find_safe_path(
         return map_memory.is_passable(f, t)
         
     def cost_fn(f, t):
-        return get_safe_cell_cost(f, t, current_step, south_bound, enemy_memory.enemy_robots, unit_type)
+        return get_safe_cell_cost(f, t, current_step, south_bound, enemy_memory.enemy_robots, unit_type, influence_map)
         
     # Sort goals by Manhattan distance to the start cell
     sorted_goals = list(goals)
