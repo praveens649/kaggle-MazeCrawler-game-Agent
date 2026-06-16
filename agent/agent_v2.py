@@ -185,52 +185,89 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
         else:
             task_manager.assign(scout.uid, Task(TASK_IDLE))
 
-    # 8. Assign workers tasks
+    # 8. Assign workers tasks with distributed allocation
     # Verify if factory has escape paths
     survivable, escape_path = survival.verify_factory_survivability(
         my_factory, memory.map, current_step, obs_state.south_bound, obs_state.north_bound
     )
 
-    blocking_wall_pos = None
+    # Dynamic factory reserve: reduce reserve when in imminent danger or trapped
+    factory = my_factory
+    base_reserve = 100  # Normal reserve
+
+    # Check if factory is in imminent danger (will be underwater soon)
+    imminent_danger = survival.is_cell_in_danger(factory.pos, current_step, obs_state.south_bound, 3)
+
+    # Check if factory is trapped (survivable but no good escape path)
+    trapped = survivable and (not escape_path or len(escape_path) <= 1)
+
+    # Dynamic reserve: 0 if in imminent danger or trapped, otherwise base reserve
+    if imminent_danger or trapped:
+        factory_reserve = 0
+    else:
+        factory_reserve = base_reserve
+
+    # Check if we have enough energy for spawning after reserve
+    spawn_decision = macro.get_spawn_decision(obs_state, config_state, current_step)
+
+    # If we don't have enough energy for the spawn decision after reserve, don't spawn
+    if spawn_decision is not None:
+        # Calculate cost of what we want to spawn
+        from agent.constants import TYPE_SCOUT, TYPE_WORKER, TYPE_MINER
+        spawn_cost = 0
+        if spawn_decision == TYPE_SCOUT:
+            spawn_cost = config_state.scout_cost
+        elif spawn_decision == TYPE_WORKER:
+            spawn_cost = config_state.worker_cost
+        elif spawn_decision == TYPE_MINER:
+            spawn_cost = config_state.miner_cost
+
+        # Check if we have enough energy after reserving
+        if factory.energy < (spawn_cost + factory_reserve):
+            spawn_decision = None  # Not enough energy after reserve
+
+    # Find all blocking walls that need to be cleared
+    blocking_walls = []
+
+    # 1. Factory escape path blocking walls (if factory is not survivable)
     if not survivable:
         # Find the nearest wall in front of factory to remove
         for r in range(my_factory.row + 1, obs_state.north_bound + 1):
             pos = (my_factory.col, r)
             w = memory.map.get_wall_value(pos)
             if w != -1 and w != 0:
-                blocking_wall_pos = pos
+                blocking_walls.append(("escape_path", pos))
                 break
 
-    # Proactive path clearing corridor scan (even if factory is currently survivable)
-    if blocking_wall_pos is None:
-        # Scan a 3-column corridor: [factory.col - 1, factory.col, factory.col + 1]
-        # From factory's row + 1 up to factory's row + 8 (or north_bound)
-        # Find the lowest row that has a vertical blocking wall.
-        found_wall = False
-        for r in range(my_factory.row + 1, min(my_factory.row + 9, obs_state.north_bound + 1)):
-            for c in [my_factory.col, my_factory.col - 1, my_factory.col + 1]:
-                if 0 <= c < config_state.width:
-                    w_prev = memory.map.get_wall_value((c, r - 1))
-                    w_curr = memory.map.get_wall_value((c, r))
+    # 2. Proactive path clearing corridor scan (even if factory is currently survivable)
+    # Scan for walls in the factory's forward corridor
+    found_wall = False
+    for r in range(my_factory.row + 1, min(my_factory.row + 9, obs_state.north_bound + 1)):
+        for c in [my_factory.col, my_factory.col - 1, my_factory.col + 1]:
+            if 0 <= c < config_state.width:
+                w_prev = memory.map.get_wall_value((c, r - 1))
+                w_curr = memory.map.get_wall_value((c, r))
 
-                    has_blocking_wall = False
-                    if w_prev != -1 and (w_prev & 1):
-                        has_blocking_wall = True
-                    elif w_curr != -1 and (w_curr & 4):
-                        has_blocking_wall = True
+                has_blocking_wall = False
+                if w_prev != -1 and (w_prev & 1):
+                    has_blocking_wall = True
+                elif w_curr != -1 and (w_curr & 4):
+                    has_blocking_wall = True
 
-                    if has_blocking_wall:
-                        blocking_wall_pos = (c, r)
-                        found_wall = True
-                        break
-            if found_wall:
-                break
+                if has_blocking_wall:
+                    blocking_walls.append(("corridor", (c, r)))
+                    found_wall = True
+                    break
+        if found_wall:
+            break
 
-    # If still no blocking wall, look for walls blocking crystals or mining nodes on our home side
-    if blocking_wall_pos is None:
+    # 3. Walls blocking crystals or mining nodes on our home side
+    if not blocking_walls:  # Only look for resource-blocking walls if we don't have urgent blocking walls
         resources = list(obs_state.crystals.keys()) + list(obs_state.mining_nodes)
-        best_resource_wall = None
-        best_dist = float('inf')
+        home_side_walls = []  # Walls blocking resources on home side
+
+        is_left_side = my_factory.col < (config_state.width // 2)
+        home_cols = range(0, config_state.width // 2) if is_left_side else range(config_state.width // 2, config_state.width)
 
         for res_pos in resources:
             rx, ry = res_pos
@@ -247,19 +284,46 @@ def agent_v2(obs: Any, config: Any) -> Dict[str, str]:
                             from utils.walls import is_fixed_wall
                             if not is_fixed_wall(rx, direction, config_state.width):
                                 dist = get_manhattan_distance(my_factory.pos, res_pos)
-                                if dist < best_dist:
-                                    best_dist = dist
-                                    best_resource_wall = res_pos
+                                home_side_walls.append((dist, neighbor))  # Store distance for sorting
 
-        if best_resource_wall is not None:
-            blocking_wall_pos = best_resource_wall
+        # Sort home side walls by distance to factory (closest first)
+        home_side_walls.sort(key=lambda x: x[0])
+        # Add the wall positions (without distance) to our blocking walls list
+        for _, wall_pos in home_side_walls:
+            blocking_walls.append(("resource", wall_pos))
 
+    # Distribute workers among blocking walls
+    # Sort workers by distance to each wall for optimal assignment
+    worker_assignments = {}  # uid -> (wall_type, wall_pos)
+
+    if blocking_walls and workers:
+        # For each wall, find the closest available worker
+        for wall_type, wall_pos in blocking_walls:
+            # Calculate distances from each worker to this wall
+            worker_distances = []
+            for worker in workers:
+                if worker.uid in worker_assignments:  # Worker already assigned
+                    continue
+                dist = get_manhattan_distance(worker.pos, wall_pos)
+                worker_distances.append((dist, worker))
+
+            # Sort workers by distance to this wall (closest first)
+            worker_distances.sort(key=lambda x: x[0])
+
+            # Assign the closest worker to this wall
+            if worker_distances:
+                _, closest_worker = worker_distances[0]
+                worker_assignments[closest_worker.uid] = (wall_type, wall_pos)
+
+    # Assign tasks to workers based on their assignments
     for worker in workers:
         if task_manager.get_task(worker.uid).name == TASK_ESCAPE_SCROLL:
             continue
-        if blocking_wall_pos is not None:
-            task_manager.assign(worker.uid, Task(TASK_REMOVE_WALL, target_pos=blocking_wall_pos))
+        if worker.uid in worker_assignments:
+            wall_type, wall_pos = worker_assignments[worker.uid]
+            task_manager.assign(worker.uid, Task(TASK_REMOVE_WALL, target_pos=wall_pos))
         else:
+            # No specific wall assigned, return to factory
             task_manager.assign(worker.uid, Task(TASK_RETURN_TO_FACTORY, target_pos=my_factory.pos))
 
     # 9. Generate raw decisions

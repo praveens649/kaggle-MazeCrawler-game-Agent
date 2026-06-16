@@ -1,6 +1,6 @@
 """Logic for scheduling energy transfers between adjacent friendly robots."""
 
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Set
 from agent.state import Robot, ObsState, GameConfig
 from memory.map_memory import MapMemory
 from strategy.survival_strategy import predict_future_boundary

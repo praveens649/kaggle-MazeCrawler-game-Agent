@@ -45,35 +45,42 @@ def assign_mining_nodes(
     current_step: int,
     width: int
 ) -> Dict[str, Tuple[int, int]]:
-    """Smartly assign miners to the nearest safe, reachable, and non-threatened mining nodes."""
+    """Smartly assign miners to the nearest safe, reachable, and non-threatened mining nodes using bipartite matching."""
     assignments: Dict[str, Tuple[int, int]] = {}
     if not miners or not mining_nodes:
         return assignments
 
     # Filter for nodes that are safe to mine (predicted to survive at least 25 turns)
-    safe_nodes = {
-        node for node in mining_nodes 
-        if node[1] > predict_future_boundary(current_step, south_bound, 25)
-    }
-    
+    # AND don't already have active mines (belonging to us or enemy)
+    safe_nodes = set()
+    for node in mining_nodes:
+        # Check if predicted to survive at least 25 turns
+        if node[1] <= predict_future_boundary(current_step, south_bound, 25):
+            continue
+
+        # Check if there's already an active mine on this node (belonging to us or enemy)
+        if node in map_memory.mines:
+            mine = map_memory.mines[node]
+            # Skip if there's already an active mine here (whether ours or enemy's)
+            continue
+
+        safe_nodes.add(node)
+
     # Identify our home side column range
     is_left_side = my_factory.col < (width // 2)
     home_cols = range(0, width // 2) if is_left_side else range(width // 2, width)
-    
+
+    # Generate all valid (miner, mining_node) pairs with their distances
+    miner_node_pairs = []
+
     for miner in miners:
-        if not safe_nodes:
-            break
-            
-        best_node = None
-        best_dist = float('inf')
-        
         for node in safe_nodes:
             nx, ny = node
-            
+
             # 1. Territorial constraint (early/mid game, step < 300)
             if current_step < 300 and nx not in home_cols:
                 continue
-                
+
             # 2. Enemy threat check (skip if enemy unit is very close to node)
             is_threatened = False
             for enemy in enemy_robots.values():
@@ -84,7 +91,7 @@ def assign_mining_nodes(
                     break
             if is_threatened:
                 continue
-                
+
             # 3. Path reachability and distance check
             is_passable_fn = lambda f, t: map_memory.is_passable(f, t)
             path = find_shortest_path(
@@ -97,14 +104,22 @@ def assign_mining_nodes(
             )
             if path is None:
                 continue  # Unreachable by known path
-                
+
             path_dist = len(path) - 1
-            if path_dist < best_dist:
-                best_dist = path_dist
-                best_node = node
-                
-        if best_node is not None:
-            assignments[miner.uid] = best_node
-            safe_nodes.remove(best_node)
-            
+            # Store the pair with distance and references
+            miner_node_pairs.append((path_dist, miner, node))
+
+    # Sort pairs by distance (closest first)
+    miner_node_pairs.sort(key=lambda x: x[0])
+
+    # Greedily match pairs, ensuring each miner and node is used at most once
+    matched_miners = set()
+    matched_nodes = set()
+
+    for distance, miner, node in miner_node_pairs:
+        if miner.uid not in matched_miners and node not in matched_nodes:
+            assignments[miner.uid] = node
+            matched_miners.add(miner.uid)
+            matched_nodes.add(node)
+
     return assignments

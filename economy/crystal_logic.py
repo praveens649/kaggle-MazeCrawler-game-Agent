@@ -17,8 +17,8 @@ def assign_crystal_targets(
     south_bound: int,
     north_bound: int
 ) -> Dict[str, Tuple[int, int]]:
-    """Smartly assign scouts to the nearest available safe crystals.
-    
+    """Smartly assign scouts to the nearest available safe crystals using bipartite matching.
+
     Filters:
     1. Home side: Restricts scouts to columns on our half of the board in early/mid game.
     2. Path Reachability: Uses BFS to verify the crystal is reachable through known space.
@@ -28,29 +28,25 @@ def assign_crystal_targets(
     if not scouts or not crystals:
         return assignments
 
-    available_crystals = set(crystals.keys())
-    
     # Identify our home side column range
     is_left_side = my_factory.col < (width // 2)
     home_cols = range(0, width // 2) if is_left_side else range(width // 2, width)
-    
+
+    # Generate all valid (scout, crystal) pairs with their distances
+    scout_crystal_pairs = []
+
     for scout in scouts:
-        if not available_crystals:
-            break
-            
-        best_crystal = None
-        best_dist = float('inf')
-        
-        for crystal_pos in available_crystals:
+        for crystal_pos, crystal_energy in crystals.items():
             cx, cy = crystal_pos
+
             # 1. Skip crystals below the south bound
             if cy <= south_bound:
                 continue
-                
+
             # 2. Territorial constraint (early/mid game, step < 300)
             if current_step < 300 and cx not in home_cols:
                 continue
-                
+
             # 3. Enemy threat checks
             is_threatened = False
             for enemy in enemy_robots.values():
@@ -61,7 +57,7 @@ def assign_crystal_targets(
                     break
             if is_threatened:
                 continue
-                
+
             # 4. Path reachability and distance check
             is_passable_fn = lambda f, t: map_memory.is_passable(f, t)
             path = find_shortest_path(
@@ -73,15 +69,23 @@ def assign_crystal_targets(
                 north_bound=north_bound
             )
             if path is None:
-                continue # Unreachable by known path
-                
+                continue  # Unreachable by known path
+
             path_dist = len(path) - 1
-            if path_dist < best_dist:
-                best_dist = path_dist
-                best_crystal = crystal_pos
-                
-        if best_crystal is not None:
-            assignments[scout.uid] = best_crystal
-            available_crystals.remove(best_crystal)
-            
+            # Store the pair with distance and references
+            scout_crystal_pairs.append((path_dist, scout, crystal_pos, crystal_energy))
+
+    # Sort pairs by distance (closest first)
+    scout_crystal_pairs.sort(key=lambda x: x[0])
+
+    # Greedily match pairs, ensuring each scout and crystal is used at most once
+    matched_scouts = set()
+    matched_crystals = set()
+
+    for distance, scout, crystal_pos, crystal_energy in scout_crystal_pairs:
+        if scout.uid not in matched_scouts and crystal_pos not in matched_crystals:
+            assignments[scout.uid] = crystal_pos
+            matched_scouts.add(scout.uid)
+            matched_crystals.add(crystal_pos)
+
     return assignments

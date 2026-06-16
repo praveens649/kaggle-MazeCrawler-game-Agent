@@ -3,65 +3,102 @@
 import heapq
 from typing import Dict, List, Tuple, Set, Optional, Callable
 from utils.geometry import get_manhattan_distance
+from memory.map_memory import MapMemory
+
+
+def predict_future_boundary(current_step: int, current_south_bound: int, steps_forward: int) -> int:
+    """Predict the southern boundary coordinate at a future step.
+
+    The scroll speed ramps linearly from 0.25 rows/turn at step 0 to 1.0 rows/turn at step 400.
+    """
+    sb = float(current_south_bound)
+    for step in range(current_step, current_step + steps_forward):
+        # Linearly interpolate speed from 0.25 to 1.0
+        speed = 0.25 + 0.75 * min(step, 400) / 400.0
+        sb += speed
+    return int(sb)
 
 def find_path_astar(
     start: Tuple[int, int],
     goal: Tuple[int, int],
     is_passable_fn,  # Callable[[Tuple[int, int], Tuple[int, int]], bool]
-    cost_fn,  # Callable[[Tuple[int, int], Tuple[int, int]], float]
+    cost_fn,  # Callable[[Tuple[int, int], Tuple[int, int], int, int, MapMemory], float]
     width: int,
     south_bound: int,
-    north_bound: int
+    north_bound: int,
+    current_step: int = 0,
+    unit_type: int = 0,
+    map_memory: Optional[MapMemory] = None
 ) -> Optional[List[Tuple[int, int]]]:
-    """Find the optimal path from start to goal using A* search.
-    
-    cost_fn takes (from_pos, to_pos) and returns a float cost weight.
+    """Find the optimal path from start to goal using A* search with scroll-awareness.
+
+    cost_fn takes (from_pos, to_pos, steps_taken, current_step, map_memory) and returns a float cost weight.
     """
     if start == goal:
         return [start]
-        
-    # Priority queue storing: (f_score, cost, x, y, path)
+
+    # Priority queue storing: (f_score, cost, x, y, path, steps_taken)
     open_set = []
-    heapq.heappush(open_set, (get_manhattan_distance(start, goal), 0.0, start[0], start[1], [start]))
-    
-    # Store visited coordinates with their g_score (cost)
+    heapq.heappush(open_set, (get_manhattan_distance(start, goal), 0.0, start[0], start[1], [start], 0))
+
+    # Store visited coordinates with their g_score (cost) and steps taken
     g_score: Dict[Tuple[int, int], float] = {start: 0.0}
-    
+    steps_taken_map: Dict[Tuple[int, int], int] = {start: 0}
+
     while open_set:
-        _, current_cost, x, y, path = heapq.heappop(open_set)
+        _, current_cost, x, y, path, steps_taken = heapq.heappop(open_set)
         curr = (x, y)
-        
+
         if curr == goal:
             return path
-            
+
         # If we found a cheaper way to get here since insertion, skip
         if current_cost > g_score.get(curr, float('inf')):
             continue
-            
+
         for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
             neighbor = (x + dx, y + dy)
             nx, ny = neighbor
-            
+
             # Boundary check
             if not (0 <= nx < width and south_bound <= ny <= north_bound):
                 continue
-                
+
             if is_passable_fn(curr, neighbor):
-                weight = cost_fn(curr, neighbor)
+                # Calculate steps it would take to reach this neighbor
+                neighbor_steps_taken = steps_taken + 1
+
+                # Check if this position will be safe from the scroll boundary when we reach it
+                # We need to predict the scroll boundary at the time we would arrive at this position
+                if map_memory is not None:
+                    # Determine move period based on unit type
+                    move_period = 1 if unit_type == 1 else 2  # Scout moves every turn, others every 2 turns
+                    steps_to_reach = neighbor_steps_taken * move_period
+
+                    # Predict future scroll boundary when we would reach this position
+                    future_sb = predict_future_boundary(current_step, south_bound, steps_to_reach)
+
+                    # If this position will be below the scroll boundary when we reach it, skip it
+                    if ny <= future_sb:
+                        continue
+
+                weight = cost_fn(curr, neighbor, steps_taken, current_step, map_memory)
                 tentative_g_score = current_cost + weight
-                
+
                 if tentative_g_score < g_score.get(neighbor, float('inf')):
                     g_score[neighbor] = tentative_g_score
+                    steps_taken_map[neighbor] = neighbor_steps_taken
                     f_score = tentative_g_score + get_manhattan_distance(neighbor, goal)
-                    heapq.heappush(open_set, (f_score, tentative_g_score, nx, ny, path + [neighbor]))
-                    
+                    heapq.heappush(open_set, (f_score, tentative_g_score, nx, ny, path + [neighbor], neighbor_steps_taken))
+
     return None
 
 def get_safe_cell_cost(
     from_pos: Tuple[int, int],
     to_pos: Tuple[int, int],
+    steps_taken: int,
     current_step: int,
-    south_bound: int,
+    map_memory,
     enemy_robots: dict,
     unit_type: int
 ) -> float:
@@ -133,7 +170,9 @@ def find_safe_path(
         return map_memory.is_passable(f, t)
         
     def cost_fn(f, t):
-        return get_safe_cell_cost(f, t, current_step, south_bound, enemy_memory.enemy_robots, unit_type)
+        # We don't know steps_taken here, so we'll pass 0 as a placeholder
+        # The find_path_astar function will handle tracking steps properly
+        return get_safe_cell_cost(f, t, 0, current_step, map_memory, enemy_memory.enemy_robots, unit_type)
         
     # Sort goals by Manhattan distance to the start cell
     sorted_goals = list(goals)
@@ -148,7 +187,10 @@ def find_safe_path(
             cost_fn=cost_fn,
             width=width,
             south_bound=south_bound,
-            north_bound=north_bound
+            north_bound=north_bound,
+            current_step=current_step,
+            unit_type=unit_type,
+            map_memory=map_memory
         )
         if path:
             return path
